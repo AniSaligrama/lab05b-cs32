@@ -117,7 +117,6 @@ bool mm_init(void) {
     return true;
 }
 
-static bool called_list_remove = false;
 
 void* mm_malloc(size_t size) {
     if (size == 0) return NULL;
