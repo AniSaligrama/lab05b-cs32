@@ -16,6 +16,8 @@
 /** The required alignment of heap payloads */
 const size_t ALIGNMENT = 2 * sizeof(size_t);
 
+static uint8_t min_block_size = 32;
+
 typedef struct block_t block_t;
 struct block_t {
     size_t header;
@@ -53,24 +55,26 @@ void list_remove(block_t* block) {
     }
 }
 
+
 /** Rounds up `size` to the nearest multiple of `n` */
 static size_t round_up(size_t size, size_t n) {
     return (size + (n - 1)) / n * n;
 }
 static size_t get_size(block_t* block) { return block->header & ~1; }
+static size_t get_size_from_header(size_t*  header) {return *header & ~1;}
 
-static block_t* get_footer(block_t* block) {
-    return (block_t*)((void*)block + (get_size(block) - sizeof(block_t)));
+static size_t* get_footer(block_t* block) {
+    return (size_t*)((void*)block + (get_size(block) - sizeof(size_t)));
 }
 
 static void set_footer(block_t* block) {
-    block_t* footer = get_footer(block);
-    *footer = *block;
+    size_t* footer = get_footer(block);
+    *footer = block->header;
 }
 
 static block_t* get_prev_block(block_t* block) {
-    block_t* prev_footer = (block_t*)((void*)block - sizeof(block_t));
-    size_t size = get_size(prev_footer);
+    size_t* prev_footer = (size_t*)((void*)block - sizeof(size_t));
+    size_t size = get_size_from_header(prev_footer);
     return (block_t*)((void*)block - size);
 }
 /** Set's a block's header with the given size and allocation state */
@@ -128,19 +132,19 @@ bool mm_init(void) {
 void* mm_malloc(size_t size) {
     // printf("malloc\n");
     // The block must have enough space for a header and be 16-byte aligned
-    size = round_up(2 * sizeof(block_t) + size, ALIGNMENT);
+    size = round_up(2 * sizeof(size_t) + size, ALIGNMENT);
 
     // printf("Size of block_t: %zu \n", sizeof(block_t));
     //   coalesce();
     // If there is a large enough free block, use it
     block_t* block = find_fit(size);
     list_remove(block);
-    size_t min_size = round_up(2 * sizeof(block_t) + sizeof(size_t), ALIGNMENT);
+    
     //*(block+size)
     if (block != NULL) {
         // SPLITTING
         size_t difference = get_size(block) - size;
-        if (difference > min_size) {
+        if (difference > min_block_size) {
             block_t* new_block = (block_t*)((void*)block + size);
             set_header(new_block, difference, false);
             list_add(new_block);
@@ -172,39 +176,7 @@ void* mm_malloc(size_t size) {
     return block->payload;
 }
 
-/**
- * merge a free block with its neibhors if they are not allocated, returns the
- * new merged block
- */
-block_t* merge(block_t* block) {
-    bool isBlockLast = false;
-    block_t* ret = block;
 
-    if (block != mm_heap_last) {
-        // check next block, block will absorb next
-        block_t* next = (block_t*)((void*)block + get_size(block));
-        if (!is_allocated(next)) {
-            if (next == mm_heap_last) isBlockLast = true;
-            set_header(block, (get_size(block) + get_size(next)), false);
-            // remove next, since it doesn't exist any more
-            list_remove(next);
-        }
-    }
-
-    if (block != mm_heap_first) {
-        // check prev, prev will absorb curr block
-        block_t* prev = get_prev_block(block);
-        if (!is_allocated(prev)) {
-            if (block == mm_heap_last) isBlockLast = true;
-            set_header(prev, (get_size(prev) + get_size(block)), false);
-            list_remove(prev);
-            ret = prev;
-        }
-    }
-
-    if (isBlockLast) mm_heap_last = ret;
-    return ret;
-}
 
 /**
  * mm_free - Releases a block to be reused for future allocations
@@ -219,7 +191,35 @@ void mm_free(void* ptr) {
     // Mark the block as unallocated
     block_t* block = block_from_payload(ptr);
     set_header(block, get_size(block), false);
-    block = merge(block);
+    bool mergedLast = block == mm_heap_last;
+
+    //merge next block
+    block_t* next = (block_t*)((void*)block + get_size(block));
+    if(block != mm_heap_last && !is_allocated(next)){
+        list_remove(next);
+        mergedLast = next == mm_heap_last;
+        size_t total_size = get_size(block) + get_size(next);
+        set_header(block, total_size, false);
+    }
+
+
+    //merge prev block
+    block_t* prev  = get_prev_block(block);
+    if(block != mm_heap_first && !is_allocated(prev)){
+        list_remove(prev);
+
+        size_t total_size = get_size(block) + get_size(prev);
+        block = prev;
+        set_header(block, total_size, false);
+        
+    }
+
+    if(mergedLast){
+        mm_heap_last = block;
+    }
+
+
+
     list_add(block);
 }
 /* mm_realloc - Change the size of the block by mm_mallocing a new block,
@@ -241,7 +241,7 @@ void* mm_realloc(void* old_ptr, size_t size) {
     // printf("new_ptr: %p\n", new_ptr);
 
     block_t* old_block = block_from_payload(old_ptr);
-    size_t old_payload_size = get_size(old_block) - 2 * sizeof(block_t);
+    size_t old_payload_size = get_size(old_block) - 2 * sizeof(size_t);
 
     // printf("sizeof old payload: %zu\n", old_payload_size);
     memcpy(new_ptr, old_ptr,
